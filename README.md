@@ -1,18 +1,25 @@
 # Keitai-DumpProcessor
 Extracts and Process Keitai Dumps in whole
+Recursive sorter for Keitai assets with:
+- .img header extraction (name at 0x30..+35 SJIS; JPEG starts at 0x80)
+- .mht / .dmt extraction:
+  * Standard MHTML (multipart/related)
+  * Fallback for HTTP-capture style files (concatenated HTTP/1.x responses)
 
 Categories:
 - appli        = .jar, .jam, .sp, .scr, .jad, .rms
-- emoji        = .gif that is exactly 20x20 px
+- emoji        = .gif exactly 20x20 px
+- gifs         = .gif (non-emoji)
 - kisekae      = .ucp, .ucm, .vui
 - charaden     = .afd
 - machichara   = .cfd, .mmd
 - flash        = .swf
 - book files   = .zbf
-- jpgs         = .jpg, .jpeg, .img  ('.img' is extracted: header 0x80, name at 0x30..0x30+35 SJIS)
+- html         = .html, .htm
+- jpgs         = .jpg, .jpeg, .img
 - camera photos= .jpg, .jpeg, .png, .bmp where width>640 or height>480
-- png          = .png  (non "camera photos")
-- bmp          = .bmp  (non "camera photos")
+- png          = .png
+- bmp          = .bmp
 - midi         = .mid
 - melodies     = .mld, .mel
 - toruca       = .trc
