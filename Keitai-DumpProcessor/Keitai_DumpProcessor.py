@@ -469,12 +469,11 @@ def main():
     # decide based on the ORIGINAL phone string (not the sanitized one)
     phone_raw = (args.phone or "").strip()
     auto_strip_preamble = phone_raw.lower().startswith("p")
-
     phone_tag = sanitize_tag(args.phone)
 
     #totals for preamble stripping across the whole run
     prestrip_totals = {".jpg": 0, ".jpeg": 0, ".gif": 0, ".swf": 0, ".ucp": 0}
-
+    linkskip_paths = set()
     counts = {cat: 0 for cat in CATEGORIES_ORDER}
     errors = 0
     processed_dirs = set()
@@ -484,14 +483,21 @@ def main():
 
         # If phone model starts with 'p', strip 0x50 junk headers in-place for JPG/GIF/SWF in this folder
         if auto_strip_preamble and root_path not in processed_dirs:
-            res = scan_and_strip_dir(root_path, offset=PREAMBLE_OFFSET, dry_run=args.dry_run)
-            # aggregate per-extension counts
-            for ext, n in res.items():
+            res_summary, res_skipped = scan_and_strip_dir(root_path, offset=PREAMBLE_OFFSET, dry_run=args.dry_run)
+            for ext, n in res_summary.items():
                 prestrip_totals[ext] = prestrip_totals.get(ext, 0) + n
+            linkskip_paths.update(res_skipped)
             processed_dirs.add(root_path)
 
         for fname in files:
             src = root_path / fname
+
+            # if this file was identified as a link-like fake, skip it completely
+            if auto_strip_preamble and src in linkskip_paths:
+                if args.dry_run:
+                    print(f"[DRY] SKIP link-like file (no export): {src}")
+                continue
+
             try:
                 category, action = classify(src)
                 if action == "extract_img_header_jpg":
@@ -547,6 +553,18 @@ def main():
         for ext in (".jpg", ".jpeg", ".gif", ".swf", ".ucp"):
             print(f"{ext:6s}: {prestrip_totals[ext]}")
         print(f"TOTAL : {strip_total}")
+
+    # Link-like skip stats
+    skip_total = len(linkskip_paths)
+    if skip_total > 0 or args.dry_run:
+        print("\n=== Link-like files skipped ===")
+        # Optional per-extension breakdown:
+        by_ext = {}
+        for p in linkskip_paths:
+            by_ext[p.suffix.lower()] = by_ext.get(p.suffix.lower(), 0) + 1
+        for ext, n in sorted(by_ext.items()):
+            print(f"{ext:6s}: {n}")
+        print(f"TOTAL : {skip_total}")
 
 if __name__ == "__main__":
     main()
