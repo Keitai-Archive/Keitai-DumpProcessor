@@ -5,29 +5,12 @@ Recursive sorter for Keitai assets with:
 - .mht / .dmt extraction:
   * Standard MHTML (multipart/related)
   * Fallback for HTTP-capture style files (concatenated HTTP/1.x responses)
-
-Categories:
-- appli        = .jar, .jam, .sp, .scr, .jad, .rms
-- emoji        = .gif exactly 20x20 px
-- gifs         = .gif (non-emoji)
-- kisekae      = .ucp, .ucm, .vui
-- charaden     = .afd
-- machichara   = .cfd, .mmd
-- flash        = .swf
-- book files   = .zbf
-- html         = .html, .htm
-- jpgs         = .jpg, .jpeg, .img
-- camera photos= .jpg, .jpeg, .png, .bmp where width>640 or height>480
-- png          = .png
-- bmp          = .bmp
-- midi         = .mid
-- melodies     = .mld, .mel
-- toruca       = .trc
-- videos       = .3gp, .mp2
+- Optional phone model suffix added to filenames (before extension) for:
+  * emoji, gifs, jpgs, bmp
 
 Usage:
   python Keitai_DumpProcessor.py /path/to/input /path/to/output
-  Normally use this: python Keitai_DumpProcessor.py --flatten /in /out
+  python Keitai_DumpProcessor.py --p "SH-10C" --flatten /in /out
 """
 
 import argparse
@@ -40,6 +23,7 @@ import re
 from typing import Optional, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
+from Keitai_PanasonicHeaderStrip import scan_and_strip_dir, PREAMBLE_OFFSET
 
 try:
     from PIL import Image
@@ -92,7 +76,24 @@ CATEGORIES_ORDER = [
     "videos",
 ]
 
+# categories that receive a phone suffix
+PHONE_SUFFIX_CATS = {"emoji", "gifs", "jpgs", "bmp"}
+
+# How the suffix is formatted in filenames (before extension)
+PHONE_SUFFIX_FMT = "_{tag}"
+
 # -------- Helpers --------
+
+def preprocess_mhtml(raw: bytes) -> bytes:
+    """
+    Some containers (e.g., Decomail DMT) prepend a non-MIME line like 'Decomail-Template'
+    before the real MIME headers. Trim to the first MIME header if found.
+    """
+    for marker in (b"MIME-Version:", b"Content-Type:"):
+        i = raw.find(marker)
+        if 0 <= i < 512:
+            return raw[i:]
+    return raw
 
 def is_camera_photo(p: Path) -> bool:
     ext = p.suffix.lower()
@@ -152,6 +153,18 @@ def sanitize_filename(name: str) -> str:
         name = name[:240]
     return name or "extracted"
 
+def sanitize_tag(tag: str) -> str:
+    """Safe compact tag for filenames like SH-10C, N902iS, etc."""
+    tag = (tag or "").strip()
+    tag = tag.replace(" ", "_")
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-+.")
+    return "".join(ch if ch in allowed else "-" for ch in tag) or ""
+
+def append_phone_suffix(path: Path, category: str, phone_tag: str) -> Path:
+    if not phone_tag or category not in PHONE_SUFFIX_CATS:
+        return path
+    return path.with_name(path.stem + PHONE_SUFFIX_FMT.format(tag=phone_tag) + path.suffix)
+
 def extract_img_header_name(src: Path) -> str:
     with open(src, 'rb') as f:
         f.seek(0x30)
@@ -183,7 +196,7 @@ def build_dest_forced_name(base_out: Path, category: str, src_rel_parent: Path, 
     if flatten:
         return base_out / category / (forced_basename + ext)
     else:
-        return base_out / category / src_rel_parent / forced_basename
+        return base_out / category / src_rel_parent / (forced_basename + ext)
 
 # -------- Classification --------
 
@@ -192,8 +205,10 @@ def classify(path: Path) -> Tuple[Optional[str], Optional[str]]:
 
     if ext in GIF_EXTS:
         return ("emoji" if is_emoji_gif(path) else "gifs"), None
+
     if ext == '.afd':
         return "charaden", None
+
     if ext in APPLI_EXTS:
         return "appli", None
     if ext in KISEKAE_EXTS:
@@ -214,6 +229,7 @@ def classify(path: Path) -> Tuple[Optional[str], Optional[str]]:
         return "toruca", None
     if ext in VIDEO_EXTS:
         return "videos", None
+
     if ext in JPG_EXTS | PNG_EXTS | BMP_EXTS:
         if is_camera_photo(path):
             return "camera photos", None
@@ -223,23 +239,16 @@ def classify(path: Path) -> Tuple[Optional[str], Optional[str]]:
             return "png", None
         if ext in BMP_EXTS:
             return "bmp", None
+
     if ext == '.img':
         return "jpgs", "extract_img_header_jpg"
+
     if ext in ('.mht', '.dmt'):
         return None, "extract_mhtdmt"
+
     return None, None
 
 # -------- MHTML / HTTP-dump extraction --------
-def preprocess_mhtml(raw: bytes) -> bytes:
-    """
-    Some containers (e.g., DMT/Decomail) start with a non-MIME preamble like
-    'Decomail-Template' before the real headers. Trim to the first MIME header.
-    """
-    for marker in (b"MIME-Version:", b"Content-Type:"):
-        i = raw.find(marker)
-        if 0 <= i < 512:  # near the top of the file
-            return raw[i:]
-    return raw
 
 def _guess_name_from_part(part, idx: int) -> str:
     loc = part.get('Content-Location')
@@ -262,7 +271,8 @@ def _guess_name_from_part(part, idx: int) -> str:
         base += ext
     return base
 
-def process_mhtml_standard(raw: bytes, container_path: Path, out_base: Path, inp_root: Path, flatten: bool, counts: dict, dry_run: bool) -> bool:
+def process_mhtml_standard(raw: bytes, container_path: Path, out_base: Path, inp_root: Path,
+                           flatten: bool, counts: dict, dry_run: bool, phone_tag: str) -> bool:
     if not HAVE_EMAIL:
         return False
     msg = BytesParser(policy=policy.default).parsebytes(raw)
@@ -301,23 +311,27 @@ def process_mhtml_standard(raw: bytes, container_path: Path, out_base: Path, inp
 
             if action == "extract_img_header_jpg":
                 base = extract_img_header_name(stage_path) or stage_path.stem
-                dest_dir = build_dest_forced_name(out_base, "jpgs", rel_parent / group, flatten, base, ".jpg")
-                final_path = unique_path(dest_dir)
+                dest_path = build_dest_forced_name(out_base, "jpgs", rel_parent / group, flatten, base, ".jpg")
+                dest_path = append_phone_suffix(dest_path, "jpgs", phone_tag)
+                dest_path = unique_path(dest_path)
                 if dry_run:
-                    print(f"[DRY] EXTRACT(.img from {container_path.suffix}) {stage_path} -> {final_path}")
+                    print(f"[DRY] EXTRACT(.img from {container_path.suffix}) {stage_path} -> {dest_path}")
                 else:
-                    write_img_payload_as_jpg(stage_path, final_path)
+                    write_img_payload_as_jpg(stage_path, dest_path)
                 counts["jpgs"] += 1
                 extracted_any = True
             else:
-                dest = (out_base / category / (rel_parent / group) / stage_path.name) if not flatten \
-                       else (out_base / category / f"{group}_{stage_path.name}")
-                final_path = unique_path(dest)
-                if dry_run:
-                    print(f"[DRY] EXTRACT({container_path.suffix}) {stage_path} -> {final_path}")
+                if not flatten:
+                    dest_path = out_base / category / (rel_parent / group) / stage_path.name
                 else:
-                    final_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(stage_path), str(final_path))
+                    dest_path = out_base / category / f"{group}_{stage_path.name}"
+                dest_path = append_phone_suffix(dest_path, category, phone_tag)
+                dest_path = unique_path(dest_path)
+                if dry_run:
+                    print(f"[DRY] EXTRACT({container_path.suffix}) {stage_path} -> {dest_path}")
+                else:
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(stage_path), str(dest_path))
                 counts[category] += 1
                 extracted_any = True
 
@@ -358,7 +372,8 @@ def _ext_from_ctype(ctype: str) -> Optional[str]:
         return '.html'
     return None
 
-def process_httpdump(raw: bytes, container_path: Path, out_base: Path, inp_root: Path, flatten: bool, counts: dict, dry_run: bool) -> bool:
+def process_httpdump(raw: bytes, container_path: Path, out_base: Path, inp_root: Path,
+                     flatten: bool, counts: dict, dry_run: bool, phone_tag: str) -> bool:
     extracted_any = False
     group = sanitize_filename(container_path.stem)
     rel_parent = container_path.parent.relative_to(inp_root) if container_path.parent != inp_root else Path()
@@ -396,37 +411,42 @@ def process_httpdump(raw: bytes, container_path: Path, out_base: Path, inp_root:
 
             if action == "extract_img_header_jpg":
                 base = stage_path.stem
-                dest_dir = build_dest_forced_name(out_base, "jpgs", rel_parent / group, flatten, base, ".jpg")
-                final_path = unique_path(dest_dir)
+                dest_path = build_dest_forced_name(out_base, "jpgs", rel_parent / group, flatten, base, ".jpg")
+                dest_path = append_phone_suffix(dest_path, "jpgs", phone_tag)
+                dest_path = unique_path(dest_path)
                 if dry_run:
-                    print(f"[DRY] EXTRACT(.img from {container_path.suffix}) {stage_path} -> {final_path}")
+                    print(f"[DRY] EXTRACT(.img from {container_path.suffix}) {stage_path} -> {dest_path}")
                 else:
-                    write_img_payload_as_jpg(stage_path, final_path)
+                    write_img_payload_as_jpg(stage_path, dest_path)
                 counts["jpgs"] += 1
                 extracted_any = True
             else:
-                dest = (out_base / category / (rel_parent / group) / stage_path.name) if not flatten \
-                       else (out_base / category / f"{group}_{stage_path.name}")
-                final_path = unique_path(dest)
-                if dry_run:
-                    print(f"[DRY] EXTRACT({container_path.suffix}) {stage_path} -> {final_path}")
+                if not flatten:
+                    dest_path = out_base / category / (rel_parent / group) / stage_path.name
                 else:
-                    final_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(stage_path), str(final_path))
+                    dest_path = out_base / category / f"{group}_{stage_path.name}"
+                dest_path = append_phone_suffix(dest_path, category, phone_tag)
+                dest_path = unique_path(dest_path)
+                if dry_run:
+                    print(f"[DRY] EXTRACT({container_path.suffix}) {stage_path} -> {dest_path}")
+                else:
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(stage_path), str(dest_path))
                 counts[category] += 1
                 extracted_any = True
 
     return extracted_any
 
-def process_mhtdmt_file(src_container: Path, out_base: Path, inp_root: Path, flatten: bool, counts: dict, dry_run: bool):
+def process_mhtdmt_file(src_container: Path, out_base: Path, inp_root: Path,
+                        flatten: bool, counts: dict, dry_run: bool, phone_tag: str):
     raw = src_container.read_bytes()
-    raw = preprocess_mhtml(raw)  # <<< NEW: strip preamble if present
+    raw = preprocess_mhtml(raw)
     # Try real MHTML first
-    if HAVE_EMAIL and process_mhtml_standard(raw, src_container, out_base, inp_root, flatten, counts, dry_run):
-        return True
-    # Fallback to HTTP dump style (concatenated HTTP/1.x responses)
-    return process_httpdump(raw, src_container, out_base, inp_root, flatten, counts, dry_run)
-
+    if HAVE_EMAIL:
+        if process_mhtml_standard(raw, src_container, out_base, inp_root, flatten, counts, dry_run, phone_tag):
+            return True
+    # Fallback to HTTP-dump
+    return process_httpdump(raw, src_container, out_base, inp_root, flatten, counts, dry_run, phone_tag)
 
 # -------- Main --------
 
@@ -437,6 +457,7 @@ def main():
     parser.add_argument("--move", action="store_true", help="Move files instead of copying.")
     parser.add_argument("--flatten", action="store_true", help="Do not preserve relative subfolder structure under each category.")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen without writing files.")
+    parser.add_argument("--p", dest="phone", type=str, default="", help="Phone model tag to append to GIF/JPG/BMP/emoji filenames (e.g., SH-10C).")
     args = parser.parse_args()
 
     inp = args.input_dir.resolve()
@@ -445,18 +466,39 @@ def main():
         print(f"Input directory does not exist: {inp}", file=sys.stderr)
         sys.exit(2)
 
+    # decide based on the ORIGINAL phone string (not the sanitized one)
+    phone_raw = (args.phone or "").strip()
+    auto_strip_preamble = phone_raw.lower().startswith("p")
+
+    phone_tag = sanitize_tag(args.phone)
+
+    #totals for preamble stripping across the whole run
+    prestrip_totals = {".jpg": 0, ".jpeg": 0, ".gif": 0, ".swf": 0, ".ucp": 0}
+
     counts = {cat: 0 for cat in CATEGORIES_ORDER}
     errors = 0
+    processed_dirs = set()
 
     for root, dirs, files in os.walk(inp):
+        root_path = Path(root)
+
+        # If phone model starts with 'p', strip 0x50 junk headers in-place for JPG/GIF/SWF in this folder
+        if auto_strip_preamble and root_path not in processed_dirs:
+            res = scan_and_strip_dir(root_path, offset=PREAMBLE_OFFSET, dry_run=args.dry_run)
+            # aggregate per-extension counts
+            for ext, n in res.items():
+                prestrip_totals[ext] = prestrip_totals.get(ext, 0) + n
+            processed_dirs.add(root_path)
+
         for fname in files:
-            src = Path(root) / fname
+            src = root_path / fname
             try:
                 category, action = classify(src)
                 if action == "extract_img_header_jpg":
                     base = extract_img_header_name(src) or src.stem
                     rel_parent = src.parent.relative_to(inp) if src.parent != inp else Path()
                     dest = build_dest_forced_name(out, "jpgs", rel_parent, args.flatten, base, ".jpg")
+                    dest = append_phone_suffix(dest, "jpgs", phone_tag)
                     dest = unique_path(dest)
                     if args.dry_run:
                         print(f"[DRY] EXTRACT .img {src} -> {dest}")
@@ -468,13 +510,14 @@ def main():
                     counts["jpgs"] += 1
 
                 elif action == "extract_mhtdmt":
-                    processed = process_mhtdmt_file(src, out, inp, args.flatten, counts, args.dry_run)
+                    processed = process_mhtdmt_file(src, out, inp, args.flatten, counts, args.dry_run, phone_tag)
                     if args.move and processed and not args.dry_run:
                         try: src.unlink()
                         except Exception: pass
 
                 elif category:
                     dest = build_dest(out, category, src, inp, args.flatten)
+                    dest = append_phone_suffix(dest, category, phone_tag)
                     dest = unique_path(dest)
                     if args.dry_run:
                         print(f"[DRY] {'MOVE' if args.move else 'COPY'} {src} -> {dest}")
@@ -496,6 +539,14 @@ def main():
         print(f"{cat:14s}: {n}")
     print(f"Errors: {errors}")
     print(f"Total processed: {total}")
+
+    #preamble-strip stats
+    strip_total = sum(prestrip_totals.values())
+    if strip_total > 0 or args.dry_run:
+        print("\n=== Preamble strip (offset 0x50) ===")
+        for ext in (".jpg", ".jpeg", ".gif", ".swf", ".ucp"):
+            print(f"{ext:6s}: {prestrip_totals[ext]}")
+        print(f"TOTAL : {strip_total}")
 
 if __name__ == "__main__":
     main()
