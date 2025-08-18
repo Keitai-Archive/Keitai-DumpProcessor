@@ -27,4 +27,4 @@ Categories:
 
 Usage:
   python Keitai_DumpProcessor.py /path/to/input /path/to/output
-  Normally use this: python Keitai_DumpProcessor.py --flatten /in /out
+  python Keitai_DumpProcessor.py --p "SH-10C" --flatten /in /out
