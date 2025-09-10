@@ -24,6 +24,7 @@ Categories:
 - melodies     = .mld, .mel
 - toruca       = .trc
 - videos       = .3gp, .mp2
+- PDF		  = .pdf
 
 Usage:
   python Keitai_DumpProcessor.py /path/to/input /path/to/output

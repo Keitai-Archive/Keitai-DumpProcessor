@@ -55,6 +55,7 @@ MIDI_EXTS = {'.mid'}
 MELODIES_EXTS = {'.mld', '.mel'}
 TORUCA_EXTS = {'.trc'}
 VIDEO_EXTS = {'.3gp', '.mp2'}
+PDF_EXTS = {'.pdf'}
 
 CATEGORIES_ORDER = [
     "emoji",
@@ -66,6 +67,7 @@ CATEGORIES_ORDER = [
     "flash",
     "book files",
     "html",
+    "pdf",
     "camera photos",
     "jpgs",
     "png",
@@ -221,6 +223,8 @@ def classify(path: Path) -> Tuple[Optional[str], Optional[str]]:
         return "book files", None
     if ext in HTML_EXTS:
         return "html", None
+    if ext in PDF_EXTS:
+        return "pdf", None
     if ext in MELODIES_EXTS:
         return "melodies", None
     if ext in MIDI_EXTS:
@@ -292,7 +296,9 @@ def process_mhtml_standard(raw: bytes, container_path: Path, out_base: Path, inp
             ctype = (part.get_content_type() or '').lower()
             name_probe = _guess_name_from_part(part, idx)
             ext = Path(name_probe).suffix.lower()
-            if ctype not in ("application/x-shockwave-flash", "image/gif", "text/html") and ext not in ('.swf', '.gif', '.html', '.htm'):
+            allowed_ctypes = {"application/x-shockwave-flash", "image/gif", "text/html", "application/pdf"}
+            allowed_exts   = {'.swf', '.gif', '.html', '.htm', '.pdf'}
+            if ctype not in allowed_ctypes and ext not in allowed_exts:
                 continue
 
             payload = part.get_payload(decode=True)
@@ -370,6 +376,8 @@ def _ext_from_ctype(ctype: str) -> Optional[str]:
         return '.gif'
     if 'text/html' in ctype or 'application/xhtml+xml' in ctype:
         return '.html'
+    if 'application/pdf' in ctype:
+        return '.pdf'
     return None
 
 def process_httpdump(raw: bytes, container_path: Path, out_base: Path, inp_root: Path,
