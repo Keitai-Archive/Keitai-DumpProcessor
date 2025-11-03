@@ -603,10 +603,6 @@ def main():
         n = counts.get(cat, 0)
         total += n
         print(f"{cat:14s}: {n}")
-    # also show MLD count if not already part of CATEGORIES_ORDER
-    if "mlds" not in CATEGORIES_ORDER:
-        print(f"{'mlds':14s}: {counts.get('mlds', 0)}")
-        total += 0  # counts already included above if you want
     print(f"Errors: {errors}")
     print(f"Total processed: {total}")
 
