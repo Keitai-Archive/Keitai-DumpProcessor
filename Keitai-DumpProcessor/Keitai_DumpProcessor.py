@@ -19,6 +19,7 @@ import sys
 import shutil
 import tempfile
 import mimetypes
+import subprocess
 import re
 from typing import Optional, Tuple
 from pathlib import Path
@@ -226,7 +227,7 @@ def classify(path: Path) -> Tuple[Optional[str], Optional[str]]:
     if ext in PDF_EXTS:
         return "pdf", None
     if ext in MELODIES_EXTS:
-        return "melodies", None
+        return "melodies", "process_mlds"
     if ext in MIDI_EXTS:
         return "midi", None
     if ext in TORUCA_EXTS:
@@ -479,10 +480,13 @@ def main():
     auto_strip_preamble = phone_raw.lower().startswith("p")
     phone_tag = sanitize_tag(args.phone)
 
-    #totals for preamble stripping across the whole run
+    # totals for preamble stripping across the whole run
     prestrip_totals = {".jpg": 0, ".jpeg": 0, ".gif": 0, ".swf": 0, ".ucp": 0}
     linkskip_paths = set()
     counts = {cat: 0 for cat in CATEGORIES_ORDER}
+    # make sure we can count MLDs even if "mlds" is not pre-initialized
+    counts.setdefault("mlds", 0)
+
     errors = 0
     processed_dirs = set()
 
@@ -523,6 +527,22 @@ def main():
                             except Exception: pass
                     counts["jpgs"] += 1
 
+                elif action == "process_mlds":
+                    # Stage MLDs into out/melodies; we'll run the tool once after the walk.
+                    melodies_dir = Path(out) / "melodies"
+                    if not args.dry_run:
+                        melodies_dir.mkdir(parents=True, exist_ok=True)
+
+                    dest = melodies_dir / src.name
+                    if args.dry_run:
+                        print(f"[DRY] {'MOVE' if args.move else 'COPY'} (MLD stage) {src} -> {dest}")
+                    else:
+                        copy_or_move(src, dest, move=args.move)
+
+                    # ensure key exists and count under 'melodies'
+                    counts.setdefault("melodies", 0)
+                    counts["melodies"] += 1
+
                 elif action == "extract_mhtdmt":
                     processed = process_mhtdmt_file(src, out, inp, args.flatten, counts, args.dry_run, phone_tag)
                     if args.move and processed and not args.dry_run:
@@ -545,16 +565,52 @@ def main():
                 errors += 1
                 print(f"[WARN] Failed to process {src}: {e}", file=sys.stderr)
 
+    # --- Post-pass: dedupe/rename MLDs with extract_mld.py (once) ---
+    try:
+        melodies_in_dir = Path(out) / "melodies"
+        if melodies_in_dir.is_dir():
+            temp_out = Path(out) / "temp"
+
+            if not args.dry_run and temp_out.exists():
+                shutil.rmtree(temp_out, ignore_errors=True)
+
+            cmd = [
+                sys.executable,
+                str(Path("Support_Scripts") / "mld-tools-main" / "extract_mld.py"),
+                str(melodies_in_dir),
+                "--out", str(temp_out),
+            ]
+
+            if args.dry_run:
+                print(f"[DRY] RUN {' '.join(map(str, cmd))}")
+                print(f"[DRY] Would remove {melodies_in_dir} and rename {temp_out} -> {melodies_in_dir}")
+            else:
+                subprocess.run(cmd, check=True)
+                shutil.rmtree(melodies_in_dir)
+                os.rename(temp_out, melodies_in_dir)
+                print(f"[OK] Processed MLDs -> {melodies_in_dir}")
+    except subprocess.CalledProcessError as e:
+        errors += 1
+        print(f"[WARN] extract_mld.py failed with exit code {e.returncode}: {e}", file=sys.stderr)
+    except Exception as e:
+        errors += 1
+        print(f"[WARN] Post-pass MLD processing failed: {e}", file=sys.stderr)
+
+    # --- Summary output ---
     print("\n=== Summary ===")
     total = 0
     for cat in CATEGORIES_ORDER:
-        n = counts[cat]
+        n = counts.get(cat, 0)
         total += n
         print(f"{cat:14s}: {n}")
+    # also show MLD count if not already part of CATEGORIES_ORDER
+    if "mlds" not in CATEGORIES_ORDER:
+        print(f"{'mlds':14s}: {counts.get('mlds', 0)}")
+        total += 0  # counts already included above if you want
     print(f"Errors: {errors}")
     print(f"Total processed: {total}")
 
-    #preamble-strip stats
+    # preamble-strip stats
     strip_total = sum(prestrip_totals.values())
     if strip_total > 0 or args.dry_run:
         print("\n=== Preamble strip (offset 0x50) ===")
@@ -566,13 +622,13 @@ def main():
     skip_total = len(linkskip_paths)
     if skip_total > 0 or args.dry_run:
         print("\n=== Link-like files skipped ===")
-        # Optional per-extension breakdown:
         by_ext = {}
         for p in linkskip_paths:
             by_ext[p.suffix.lower()] = by_ext.get(p.suffix.lower(), 0) + 1
         for ext, n in sorted(by_ext.items()):
             print(f"{ext:6s}: {n}")
         print(f"TOTAL : {skip_total}")
+
 
 if __name__ == "__main__":
     main()
