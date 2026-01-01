@@ -1,17 +1,17 @@
 # Keitai_PanasonicHeaderStrip.py
 """
-Strip 0x50-byte preambles from JPG/GIF/SWF/UCP files on a per-folder basis,
+Strip 0x50-byte preambles from JPG/GIF/SWF/UCP/CFD files on a per-folder basis,
 and skip link-like fake assets.
 
 Behavior (per folder):
-- Build candidate lists for .jpg/.jpeg, .gif, .swf, .ucp
+- Build candidate lists for .jpg/.jpeg, .gif, .swf, .ucp, .cfd
 - Skip files that look like links (contain '/usr/local/share/dfe/data//')
 - Probe one remaining file per type; if its REAL magic appears at offset 0x50,
   strip 0x50 bytes from ALL files of that type in that folder (in-place, atomic)
 
 Return:
   (summary_dict, skipped_paths_set)
-  where summary_dict is like {'.jpg': N, '.jpeg': M, '.gif': K, '.swf': X, '.ucp': Y}
+  where summary_dict is like {'.jpg': N, '.jpeg': M, '.gif': K, '.swf': X, '.ucp': Y, '.cfd': Z}
         skipped_paths_set is a set of Path objects that matched the link-like pattern
 """
 
@@ -30,6 +30,7 @@ MAGIC_BY_EXT: Dict[str, Tuple[bytes, ...]] = {
     ".gif":  (b"GIF87a", b"GIF89a"),            # GIF headers
     ".swf":  (b"FWS", b"CWS", b"ZWS"),          # SWF variants
     ".ucp":  (b"PK\x03\x04", b"PK\x01\x02", b"PK\x05\x06", b"PK\x07\x08"),  # ZIP signatures
+    ".cfd":  (b"CFD",),                         # CFD Header
 }
 
 TARGET_EXTS = set(MAGIC_BY_EXT.keys())
@@ -102,14 +103,14 @@ def scan_and_strip_dir(
     dry_run: bool = False,
 ):
     """
-    Scan a single folder. For each target type (jpg/jpeg, gif, swf, ucp):
+    Scan a single folder. For each target type (jpg/jpeg, gif, swf, ucp, cfd):
       - Skip link-like files (contain LINK_MARKER)
       - Probe one file to see if REAL magic appears at `offset`
       - If yes, strip `offset` bytes from ALL files of that type in the folder
 
     Returns (summary, skipped_paths)
     """
-    summary = {".jpg": 0, ".jpeg": 0, ".gif": 0, ".swf": 0, ".ucp": 0}
+    summary = {".jpg": 0, ".jpeg": 0, ".gif": 0, ".swf": 0, ".ucp": 0, ".cfd": 0}
     skipped: Set[Path] = set()
 
     if not folder.is_dir():
