@@ -21,7 +21,7 @@ Categories:
 - png          = .png
 - bmp          = .bmp
 - midi         = .mid
-- melodies     = .mld, .mel
+- melodies     = .mld, .mel, .dwn
 - toruca       = .trc
 - videos       = .3gp, .mp2
 - PDF		  = .pdf
