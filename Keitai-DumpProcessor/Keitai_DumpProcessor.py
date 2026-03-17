@@ -246,8 +246,13 @@ def extract_ucp_file(src: Path, out_base: Path, inp_root: Path, flatten: bool, d
     else:
         extract_dir = out_base / "kisekae" / rel_parent / folder_name
     
+    # Place the original .ucp in the kisekae root (respecting rel_parent)
+    if flatten:
+        ucp_dest = out_base / "kisekae" / src.name
+    else:
+        ucp_dest = out_base / "kisekae" / rel_parent / src.name
+    
     if dry_run:
-        ucp_dest = extract_dir / src.name
         print(f"[DRY] KEEP UCP {src} -> {ucp_dest}")
         print(f"[DRY] EXTRACT UCP {src} -> {extract_dir}/")
         try:
@@ -261,12 +266,13 @@ def extract_ucp_file(src: Path, out_base: Path, inp_root: Path, flatten: bool, d
     else:
         try:
             extract_dir.mkdir(parents=True, exist_ok=True)
+            ucp_dest.parent.mkdir(parents=True, exist_ok=True)
             
-            # Copy the original .ucp file into the extraction folder
-            ucp_dest = unique_path(extract_dir / src.name)
+            # Copy the original .ucp file to the kisekae root
+            ucp_dest = unique_path(ucp_dest)
             shutil.copy2(str(src), str(ucp_dest))
             
-            # Extract the ZIP contents alongside it
+            # Extract the ZIP contents into the subfolder
             with zipfile.ZipFile(src, 'r') as zf:
                 zf.extractall(extract_dir)
                 return len(zf.namelist()) + 1  # +1 for the kept original
