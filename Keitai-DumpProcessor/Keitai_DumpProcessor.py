@@ -238,10 +238,6 @@ def build_dest_forced_name(base_out: Path, category: str, src_rel_parent: Path, 
 # -------- UCP Extraction --------
 
 def extract_ucp_file(src: Path, out_base: Path, inp_root: Path, flatten: bool, dry_run: bool) -> int:
-    """
-    Extract UCP file (ZIP archive) into kisekae category.
-    Returns the number of files extracted.
-    """
     folder_name = sanitize_filename(src.stem)
     rel_parent = src.parent.relative_to(inp_root) if src.parent != inp_root else Path()
     
@@ -251,21 +247,29 @@ def extract_ucp_file(src: Path, out_base: Path, inp_root: Path, flatten: bool, d
         extract_dir = out_base / "kisekae" / rel_parent / folder_name
     
     if dry_run:
+        ucp_dest = extract_dir / src.name
+        print(f"[DRY] KEEP UCP {src} -> {ucp_dest}")
         print(f"[DRY] EXTRACT UCP {src} -> {extract_dir}/")
         try:
             with zipfile.ZipFile(src, 'r') as zf:
                 for name in zf.namelist():
                     print(f"[DRY]   - {name}")
-                return len(zf.namelist())
+                return len(zf.namelist()) + 1  # +1 for the kept original
         except Exception as e:
             print(f"[DRY]   Error reading UCP: {e}")
-            return 0
+            return 1  # still count the original copy
     else:
         try:
             extract_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Copy the original .ucp file into the extraction folder
+            ucp_dest = unique_path(extract_dir / src.name)
+            shutil.copy2(str(src), str(ucp_dest))
+            
+            # Extract the ZIP contents alongside it
             with zipfile.ZipFile(src, 'r') as zf:
                 zf.extractall(extract_dir)
-                return len(zf.namelist())
+                return len(zf.namelist()) + 1  # +1 for the kept original
         except Exception as e:
             print(f"[WARN] Failed to extract UCP {src}: {e}", file=sys.stderr)
             return 0
