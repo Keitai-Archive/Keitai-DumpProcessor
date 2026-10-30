@@ -22,6 +22,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Keitai_DumpProcessor.py" />
+    <Compile Include="Keitai_AssetRecovery.py" />
+    <Compile Include="Keitai_Media.py" />
+    <Compile Include="Keitai_PanasonicHeaderStrip.py" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

@@ -29,6 +29,7 @@ from typing import Optional, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
 from Keitai_PanasonicHeaderStrip import scan_and_strip_dir, PREAMBLE_OFFSET
+from Keitai_Media import find_gifs, image_info
 
 try:
     from PIL import Image
@@ -112,12 +113,7 @@ def is_image_corrupt(fp: Path) -> bool:
     Returns True if corrupt, False if valid.
     """
     try:
-        with Image.open(fp) as im:
-            # Verify the image integrity
-            im.verify()
-        # Re-open to test actual loading (verify() closes the file)
-        with Image.open(fp) as im:
-            im.load()
+        image_info(fp.read_bytes())
         return False  # Image is valid
     except Exception:
         return True  # Image is corrupt
@@ -346,40 +342,8 @@ def extract_ucp_file(src: Path, out_base: Path, inp_root: Path, flatten: bool, d
 # -------- AFD (Charaden) GIF Extraction --------
 
 def find_gif_boundaries(data: bytes) -> list:
-    """
-    Find all GIF images in binary data by locating GIF headers and trailers.
-    Returns list of (start_offset, end_offset) tuples.
-    """
-    gifs = []
-    # GIF magic numbers: GIF87a or GIF89a
-    gif_signatures = [b'GIF87a', b'GIF89a']
-    
-    offset = 0
-    while offset < len(data):
-        # Find next GIF header
-        next_gif = -1
-        for sig in gif_signatures:
-            pos = data.find(sig, offset)
-            if pos != -1 and (next_gif == -1 or pos < next_gif):
-                next_gif = pos
-        
-        if next_gif == -1:
-            break
-        
-        # Find the GIF trailer (0x3B) which marks the end
-        # Start searching after the header
-        trailer_search_start = next_gif + 6
-        trailer_pos = data.find(b'\x3B', trailer_search_start)
-        
-        if trailer_pos != -1:
-            # Include the trailer byte
-            gifs.append((next_gif, trailer_pos + 1))
-            offset = trailer_pos + 1
-        else:
-            # No trailer found, skip this one
-            offset = next_gif + 6
-    
-    return gifs
+    """Parse GIF blocks so palette/LZW bytes cannot be mistaken for trailers."""
+    return find_gifs(data)
 
 def extract_gifs_from_afd(src: Path, out_base: Path, inp_root: Path, flatten: bool, 
                           dry_run: bool, phone_tag: str, corrupt_tracker: dict) -> int:
@@ -411,7 +375,7 @@ def extract_gifs_from_afd(src: Path, out_base: Path, inp_root: Path, flatten: bo
     for idx, (start, end) in enumerate(gifs):
         gif_data = data[start:end]
         gif_name = f"gif_{idx:02d}.gif"
-        gif_path = extract_dir / gif_name
+        gif_path = unique_path(extract_dir / gif_name)
         
         if dry_run:
             print(f"[DRY] EXTRACT GIF from AFD {src} -> {gif_path} ({len(gif_data)} bytes)")
@@ -426,7 +390,7 @@ def extract_gifs_from_afd(src: Path, out_base: Path, inp_root: Path, flatten: bo
                     # Move to Corrupt subfolder
                     corrupt_dir = extract_dir / "Corrupt"
                     corrupt_dir.mkdir(parents=True, exist_ok=True)
-                    corrupt_path = corrupt_dir / gif_name
+                    corrupt_path = unique_path(corrupt_dir / gif_path.name)
                     shutil.move(str(gif_path), str(corrupt_path))
                     corrupt_tracker["gifs"] += 1
                 
@@ -537,8 +501,9 @@ def process_mhtml_standard(raw: bytes, container_path: Path, out_base: Path, inp
             ctype = (part.get_content_type() or '').lower()
             name_probe = _guess_name_from_part(part, idx)
             ext = Path(name_probe).suffix.lower()
-            allowed_ctypes = {"application/x-shockwave-flash", "image/gif", "text/html", "application/pdf"}
-            allowed_exts   = {'.swf', '.gif', '.html', '.htm', '.pdf'}
+            allowed_ctypes = {"application/x-shockwave-flash", "image/gif", "image/jpeg",
+                              "image/png", "image/bmp", "text/html", "application/pdf"}
+            allowed_exts   = {'.swf', '.gif', '.jpg', '.jpeg', '.png', '.bmp', '.html', '.htm', '.pdf'}
             if ctype not in allowed_ctypes and ext not in allowed_exts:
                 continue
 
@@ -546,7 +511,8 @@ def process_mhtml_standard(raw: bytes, container_path: Path, out_base: Path, inp
             if not payload:
                 continue
 
-            fname = sanitize_filename(name_probe)
+            # sanitize_filename strips .jpg; preserve the extension for classify().
+            fname = sanitize_filename(Path(name_probe).stem) + Path(name_probe).suffix
             stage_path = tmpdir_path / fname
             stage_path.parent.mkdir(parents=True, exist_ok=True)
             with open(stage_path, 'wb') as w:
@@ -624,6 +590,12 @@ def _ext_from_ctype(ctype: str) -> Optional[str]:
         return '.swf'
     if 'image/gif' in ctype:
         return '.gif'
+    if 'image/jpeg' in ctype:
+        return '.jpg'
+    if 'image/png' in ctype:
+        return '.png'
+    if 'image/bmp' in ctype:
+        return '.bmp'
     if 'text/html' in ctype or 'application/xhtml+xml' in ctype:
         return '.html'
     if 'application/pdf' in ctype:
@@ -724,6 +696,7 @@ def main():
     parser.add_argument("--move", action="store_true", help="Move files instead of copying.")
     parser.add_argument("--flatten", action="store_true", help="Do not preserve relative subfolder structure under each category.")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen without writing files.")
+    parser.add_argument("--complete", action="store_true", help="Archive every input and export recognized assets with a per-file manifest; requires a fresh output folder.")
     parser.add_argument("--p", dest="phone", type=str, default="", help="Phone model tag to append to GIF/JPG/BMP/emoji filenames (e.g., SH-10C).")
     args = parser.parse_args()
 
@@ -732,6 +705,15 @@ def main():
     if not inp.exists() or not inp.is_dir():
         print(f"Input directory does not exist: {inp}", file=sys.stderr)
         sys.exit(2)
+
+    if args.complete:
+        from Keitai_AssetRecovery import process_tree
+        try:
+            result = process_tree(inp, out, phone=args.phone, flatten=args.flatten,
+                                  dry_run=args.dry_run, move=args.move)
+        except (OSError, ValueError) as error:
+            parser.exit(2, f"Complete export failed: {error}\n")
+        return 1 if result['summary']['statuses'].get('error') else 0
 
     # decide based on the ORIGINAL phone string (not the sanitized one)
     phone_raw = (args.phone or "").strip()
@@ -833,6 +815,9 @@ def main():
                 category, action = classify(src)
                 
                 if action == "extract_afd_gifs":
+                    # Extract before a --move removes the input container.
+                    gif_count = extract_gifs_from_afd(src, out, inp, args.flatten, args.dry_run, phone_tag, corrupt_images)
+                    afd_gifs_extracted += gif_count
                     # First, copy/move the AFD file itself to charaden
                     dest = build_dest(out, "charaden", src, inp, args.flatten)
                     dest = unique_path(dest)
@@ -842,9 +827,6 @@ def main():
                         copy_or_move(src, dest, move=args.move)
                     counts["charaden"] += 1
                     
-                    # Then extract GIFs from the AFD
-                    gif_count = extract_gifs_from_afd(src, out, inp, args.flatten, args.dry_run, phone_tag, corrupt_images)
-                    afd_gifs_extracted += gif_count
                     
                 elif action == "extract_img_header_jpg":
                     rel_parent = src.parent.relative_to(inp)
@@ -867,7 +849,7 @@ def main():
                     if not args.dry_run:
                         melodies_dir.mkdir(parents=True, exist_ok=True)
 
-                    dest = melodies_dir / src.name
+                    dest = unique_path(melodies_dir / src.name)
                     if args.dry_run:
                         print(f"[DRY] {'MOVE' if args.move else 'COPY'} (MLD stage) {src} -> {dest}")
                     else:
@@ -934,7 +916,7 @@ def main():
 
             cmd = [
                 sys.executable,
-                str(Path("Support_Scripts") / "mld-tools-main" / "extract_mld.py"),
+                str(Path(__file__).resolve().parent / "Support_Scripts" / "mld-tools-main" / "extract_mld.py"),
                 str(melodies_in_dir),
                 "--out", str(temp_out),
             ]
@@ -944,8 +926,14 @@ def main():
                 print(f"[DRY] Would remove {melodies_in_dir} and rename {temp_out} -> {melodies_in_dir}")
             else:
                 subprocess.run(cmd, check=True)
-                shutil.rmtree(melodies_in_dir)
-                os.rename(temp_out, melodies_in_dir)
+                if temp_out.is_dir() and any(temp_out.iterdir()):
+                    # Keep staged source files, including anything the MLD parser
+                    # did not understand. Put derivatives alongside them.
+                    converted = melodies_in_dir / 'extracted'
+                    converted.mkdir(exist_ok=True)
+                    for item in temp_out.iterdir():
+                        shutil.move(str(item), str(unique_path(converted / item.name)))
+                    temp_out.rmdir()
     except subprocess.CalledProcessError as e:
         errors += 1
         print(f"[WARN] extract_mld.py failed with exit code {e.returncode}: {e}", file=sys.stderr)
@@ -992,4 +980,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
