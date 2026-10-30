@@ -1,7 +1,8 @@
 # Keitai-DumpProcessor
 Extracts and Process Keitai Dumps in whole
 Recursive sorter for Keitai assets with:
-- .img header extraction (name at 0x30..+35 SJIS; JPEG starts at 0x80)
+- .img header extraction: legacy JPEG payloads at 0x80 and NEC payloads at
+  0xBC, detected by JPEG magic. NEC titles start at 0x1F; legacy titles at 0x30.
 - .mht / .dmt extraction:
   * Standard MHTML (multipart/related)
   * Fallback for HTTP-capture style files (concatenated HTTP/1.x responses)
@@ -16,8 +17,9 @@ Categories:
 - flash        = .swf
 - book files   = .zbf
 - html         = .html, .htm
-- jpgs         = .jpg, .jpeg, .img
-- camera photos= .jpg, .jpeg, .png, .bmp where width>640 or height>480
+- jpgs         = .jpg, .jpeg and supported .img JPEGs without camera evidence
+- camera photos= images (including extracted .img JPEGs) with an EXIF camera
+  Model, or width>640 or height>480.
 - png          = .png
 - bmp          = .bmp
 - midi         = .mid

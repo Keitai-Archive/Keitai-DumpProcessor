@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env python3
 """
 Recursive sorter for Keitai assets with:
-- .img header extraction (name at 0x30..+35 SJIS; JPEG starts at 0x80)
+- .img header extraction (legacy 0x80 and NEC 0xBC JPEG payloads)
 - .mht / .dmt extraction:
   * Standard MHTML (multipart/related)
   * Fallback for HTTP-capture style files (concatenated HTTP/1.x responses)
@@ -24,6 +24,7 @@ import mimetypes
 import subprocess
 import re
 import zipfile
+import io
 from typing import Optional, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
@@ -132,13 +133,22 @@ def preprocess_mhtml(raw: bytes) -> bytes:
             return raw[i:]
     return raw
 
+def is_camera_image(im) -> bool:
+    """Use camera EXIF when available, including photos below VGA resolution."""
+    w, h = im.size
+    try:
+        model = im.getexif().get(272) or ""
+    except Exception:
+        model = ""
+    return bool(str(model).strip("\x00 ")) or (w > 640) or (h > 480)
+
+
 def is_camera_photo(p: Path) -> bool:
     ext = p.suffix.lower()
     if ext in JPG_EXTS | PNG_EXTS | BMP_EXTS:
         try:
             with Image.open(p) as im:
-                w, h = im.size
-            return (w > 640) or (h > 480)
+                return is_camera_image(im)
         except Exception:
             return False
     return False
@@ -202,22 +212,75 @@ def append_phone_suffix(path: Path, category: str, phone_tag: str) -> Path:
         return path
     return path.with_name(path.stem + PHONE_SUFFIX_FMT.format(tag=phone_tag) + path.suffix)
 
+class UnsupportedImageContainer(ValueError):
+    pass
+
+
+def img_payload_offset(src: Path) -> int:
+    """Identify supported wrappers by JPEG magic, never by extension alone."""
+    with src.open('rb') as f:
+        head = f.read(0xBF)
+    for offset in (0, 0x80, 0xBC):
+        if head[offset:offset + 3] == b'\xff\xd8\xff':
+            return offset
+    raise UnsupportedImageContainer("No JPEG at a supported .img payload offset (0, 0x80, 0xBC)")
+
+
 def extract_img_header_name(src: Path) -> str:
+    offset = img_payload_offset(src)
+    if offset == 0:
+        return sanitize_filename(src.stem)
     with open(src, 'rb') as f:
-        f.seek(0x30)
+        # NEC's 0xBC wrapper stores its name at 0x1F, not 0x30.
+        f.seek(0x1F if offset == 0xBC else 0x30)
         raw = f.read(36)
     raw = raw.split(b'\x00', 1)[0]
     try:
         name = raw.decode('shift_jis', errors='ignore').strip()
     except Exception:
         name = ""
-    return sanitize_filename(name)
+    return sanitize_filename(name or src.stem)
 
 def write_img_payload_as_jpg(src: Path, dest: Path) -> None:
+    offset = img_payload_offset(src)
     dest.parent.mkdir(parents=True, exist_ok=True)
     with open(src, 'rb') as fin, open(dest, 'wb') as fout:
-        fin.seek(0x80)
+        fin.seek(offset)
         shutil.copyfileobj(fin, fout)
+
+
+def process_img_file(src: Path, out_base: Path, rel_parent: Path,
+                     flatten: bool, dry_run: bool, phone_tag: str,
+                     counts: dict, corrupt_tracker: dict, move: bool = False):
+    offset = img_payload_offset(src)
+    payload = src.read_bytes()[offset:]
+    category = "jpgs"
+    try:
+        with Image.open(io.BytesIO(payload)) as im:
+            if is_camera_image(im):
+                category = "camera photos"
+    except Exception:
+        pass  # Preserve a damaged JPEG in Corrupt for further recovery.
+    base = extract_img_header_name(src)
+    dest = build_dest_forced_name(out_base, category, rel_parent, flatten, base, ".jpg")
+    dest = append_phone_suffix(dest, category, phone_tag)
+    if dry_run:
+        print(f"[DRY] EXTRACT .img at {offset:#x} {src} -> {dest}")
+    else:
+        dest = unique_path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(payload)
+        corrupt = is_image_corrupt(dest)
+        if corrupt:
+            # Resolve collisions in the FINAL directory as well; otherwise each
+            # failed extraction can overwrite the previous Corrupt file.
+            corrupt_dest = unique_path(dest.parent / "Corrupt" / dest.name)
+            corrupt_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dest), str(corrupt_dest))
+            corrupt_tracker[category] += 1
+        if move and not corrupt:
+            src.unlink()
+    counts[category] += 1
 
 def build_dest(base_out: Path, category: str, src: Path, root_in: Path, flatten: bool, new_ext: Optional[str]=None) -> Path:
     rel = src.relative_to(root_in)
@@ -494,27 +557,8 @@ def process_mhtml_standard(raw: bytes, container_path: Path, out_base: Path, inp
                 continue
 
             if action == "extract_img_header_jpg":
-                base = extract_img_header_name(stage_path) or stage_path.stem
-                dest_path = build_dest_forced_name(out_base, "jpgs", rel_parent / group, flatten, base, ".jpg")
-                dest_path = append_phone_suffix(dest_path, "jpgs", phone_tag)
-                dest_path = unique_path(dest_path)
-                
-                if dry_run:
-                    print(f"[DRY] EXTRACT(.img from {container_path.suffix}) {stage_path} -> {dest_path}")
-                else:
-                    write_img_payload_as_jpg(stage_path, dest_path)
-                    # Check if the extracted JPEG is corrupt
-                    if is_image_corrupt(dest_path):
-                        # Move to Corrupt subfolder
-                        if flatten:
-                            corrupt_dest = out_base / "jpgs" / "Corrupt" / dest_path.name
-                        else:
-                            corrupt_dest = out_base / "jpgs" / "Corrupt" / (rel_parent / group) / dest_path.name
-                        corrupt_dest.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(dest_path), str(corrupt_dest))
-                        corrupt_tracker["jpgs"] += 1
-                
-                counts["jpgs"] += 1
+                process_img_file(stage_path, out_base, rel_parent / group,
+                                 flatten, dry_run, phone_tag, counts, corrupt_tracker)
                 extracted_any = True
             else:
                 if not flatten:
@@ -525,7 +569,7 @@ def process_mhtml_standard(raw: bytes, container_path: Path, out_base: Path, inp
                 dest_path = unique_path(dest_path)
                 
                 # Check if it's a corrupt image
-                image_categories = {"emoji", "gifs", "jpgs", "png", "bmp"}
+                image_categories = {"emoji", "gifs", "jpgs", "png", "bmp", "camera photos"}
                 is_corrupt = False
                 if category in image_categories and not dry_run:
                     is_corrupt = is_image_corrupt(stage_path)
@@ -624,27 +668,8 @@ def process_httpdump(raw: bytes, container_path: Path, out_base: Path, inp_root:
                 continue
 
             if action == "extract_img_header_jpg":
-                base = stage_path.stem
-                dest_path = build_dest_forced_name(out_base, "jpgs", rel_parent / group, flatten, base, ".jpg")
-                dest_path = append_phone_suffix(dest_path, "jpgs", phone_tag)
-                dest_path = unique_path(dest_path)
-                
-                if dry_run:
-                    print(f"[DRY] EXTRACT(.img from {container_path.suffix}) {stage_path} -> {dest_path}")
-                else:
-                    write_img_payload_as_jpg(stage_path, dest_path)
-                    # Check if the extracted JPEG is corrupt
-                    if is_image_corrupt(dest_path):
-                        # Move to Corrupt subfolder
-                        if flatten:
-                            corrupt_dest = out_base / "jpgs" / "Corrupt" / dest_path.name
-                        else:
-                            corrupt_dest = out_base / "jpgs" / "Corrupt" / (rel_parent / group) / dest_path.name
-                        corrupt_dest.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(dest_path), str(corrupt_dest))
-                        corrupt_tracker["jpgs"] += 1
-                
-                counts["jpgs"] += 1
+                process_img_file(stage_path, out_base, rel_parent / group,
+                                 flatten, dry_run, phone_tag, counts, corrupt_tracker)
                 extracted_any = True
             else:
                 if not flatten:
@@ -655,7 +680,7 @@ def process_httpdump(raw: bytes, container_path: Path, out_base: Path, inp_root:
                 dest_path = unique_path(dest_path)
                 
                 # Check if it's a corrupt image
-                image_categories = {"emoji", "gifs", "jpgs", "png", "bmp"}
+                image_categories = {"emoji", "gifs", "jpgs", "png", "bmp", "camera photos"}
                 is_corrupt = False
                 if category in image_categories and not dry_run:
                     is_corrupt = is_image_corrupt(stage_path)
@@ -727,6 +752,7 @@ def main():
     corrupt_images = {"emoji": 0, "gifs": 0, "jpgs": 0, "png": 0, "bmp": 0, "camera photos": 0}
 
     errors = 0
+    unsupported_img_files = 0
     processed_dirs = set()
     processed_files = set()  # Track files we've already processed (for empty SP handling)
 
@@ -821,26 +847,10 @@ def main():
                     afd_gifs_extracted += gif_count
                     
                 elif action == "extract_img_header_jpg":
-                    base = extract_img_header_name(src) or src.stem
-                    rel_parent = src.parent.relative_to(inp) if src.parent != inp else Path()
-                    dest = build_dest_forced_name(out, "jpgs", rel_parent, args.flatten, base, ".jpg")
-                    dest = append_phone_suffix(dest, "jpgs", phone_tag)
-                    dest = unique_path(dest)
-                    if args.dry_run:
-                        print(f"[DRY] EXTRACT .img {src} -> {dest}")
-                    else:
-                        write_img_payload_as_jpg(src, dest)
-                        # Check if the extracted JPEG is corrupt
-                        if is_image_corrupt(dest):
-                            # Move to Corrupt subfolder
-                            corrupt_dest = dest.parent / "Corrupt" / dest.name
-                            corrupt_dest.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.move(str(dest), str(corrupt_dest))
-                            corrupt_images["jpgs"] += 1
-                        if args.move:
-                            try: src.unlink()
-                            except Exception: pass
-                    counts["jpgs"] += 1
+                    rel_parent = src.parent.relative_to(inp)
+                    process_img_file(src, out, rel_parent, args.flatten,
+                                     args.dry_run, phone_tag, counts,
+                                     corrupt_images, move=args.move)
 
                 elif action == "extract_ucp":
                     # Extract UCP (ZIP) file
@@ -906,6 +916,9 @@ def main():
                 else:
                     continue
 
+            except UnsupportedImageContainer as e:
+                unsupported_img_files += 1
+                print(f"[SKIP] Unsupported .img left in input: {src}: {e}", file=sys.stderr)
             except Exception as e:
                 errors += 1
                 print(f"[WARN] Failed to process {src}: {e}", file=sys.stderr)
@@ -949,6 +962,8 @@ def main():
         print(f"{cat:14s}: {n}")
     print(f"Errors: {errors}")
     print(f"Total processed: {total}")
+    if unsupported_img_files:
+        print(f"Unsupported .img files left in input: {unsupported_img_files}")
     
     if empty_sp_files > 0:
         print(f"\nFiles moved to Empty_SP folder: {empty_sp_files}")
